@@ -283,3 +283,318 @@ test("анализ и редактор на всех разрешениях, б�
   }
   expect(errors).toEqual([]);
 });
+
+test("колесо над сценой меняет масштаб без прокрутки, вне сцены прокручивает страницу", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await page.goto(lab);
+  await page.getByRole("tab", { name: "Анализ", exact: true }).click();
+  const surface = page.locator(".scene > svg");
+  await surface.hover();
+  const scroll = await page.evaluate(() => scrollY),
+    scale = Number(await surface.getAttribute("data-scale"));
+  await page.mouse.wheel(0, -250);
+  await expect
+    .poll(async () => Number(await surface.getAttribute("data-scale")))
+    .toBeGreaterThan(scale);
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => scrollY)).toBe(scroll);
+  const playback = await page.locator(".playback").boundingBox();
+  await page.mouse.move(playback!.x + 20, playback!.y + 20);
+  await page.mouse.wheel(0, 200);
+  await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(scroll);
+});
+for (const panel of ["parameters", "measurements"])
+  test(`прокрутка ${panel}: внутри панели и передача странице на обеих границах`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1440, height: 800 });
+    await page.goto(lab);
+    await page.getByRole("tab", { name: "Анализ", exact: true }).click();
+    const aside = page.locator(`.${panel}-panel`);
+    if (panel === "parameters")
+      await aside
+        .locator("details")
+        .evaluateAll((elements) =>
+          elements.forEach((e) => ((e as HTMLDetailsElement).open = true)),
+        );
+    await aside.evaluate((e) => {
+      e.scrollTop = 20;
+    });
+    const box = (await aside.boundingBox())!;
+    await page.mouse.move(box.x + 15, box.y + box.height / 2);
+    await page.mouse.wheel(0, 100);
+    await expect
+      .poll(() => aside.evaluate((e) => e.scrollTop))
+      .toBeGreaterThan(20);
+    expect(await page.evaluate(() => scrollY)).toBe(0);
+    await aside.evaluate((e) => {
+      e.scrollTop = e.scrollHeight;
+    });
+    await page.waitForTimeout(100);
+    await page.mouse.wheel(0, 180);
+    await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(0);
+    await page.evaluate(() => scrollTo(0, 150));
+    await aside.evaluate((e) => {
+      e.scrollTop = 0;
+    });
+    await page.waitForTimeout(100);
+    const newBox = (await aside.boundingBox())!;
+    await page.mouse.move(
+      newBox.x + 15,
+      Math.max(80, newBox.y + newBox.height / 2),
+    );
+    await page.mouse.wheel(0, -100);
+    await expect.poll(() => page.evaluate(() => scrollY)).toBeLessThan(150);
+  });
+test("обычное колесо над карточкой графика прокручивает анализ без изменения масштаба", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 700 });
+  await page.goto(lab);
+  await page.getByRole("tab", { name: "Анализ", exact: true }).click();
+  await page.getByRole("button", { name: "График 2/4" }).click();
+  await page.getByRole("button", { name: "График 3/4" }).click();
+  const chart = page.locator(".chart-area").first();
+  await chart.scrollIntoViewIfNeeded();
+  await chart.hover();
+  const before = await page.evaluate(() => scrollY),
+    path = await page.locator(".recharts-line-curve").first().getAttribute("d");
+  await page.mouse.wheel(0, 150);
+  await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(before);
+  expect(
+    await page.locator(".recharts-line-curve").first().getAttribute("d"),
+  ).toBe(path);
+});
+test("длинный полёт: приближение первых метров, неподвижность точки и дробные уникальные деления", async ({
+  page,
+}) => {
+  await page.goto(lab);
+  await page
+    .getByLabel("Начальная скорость: точное значение", { exact: true })
+    .fill("1000");
+  const surface = page.locator(".scene > svg"),
+    body = page.locator(".body");
+  const original = (await body.boundingBox())!,
+    x = original.x + original.width / 2,
+    y = original.y + original.height / 2;
+  await page.mouse.move(x, y);
+  for (let i = 0; i < 13; i++) {
+    const before = Number(await surface.getAttribute("data-scale"));
+    await page.mouse.wheel(0, -500);
+    await expect
+      .poll(async () => Number(await surface.getAttribute("data-scale")))
+      .toBeGreaterThan(before);
+  }
+  expect(Number(await surface.getAttribute("data-world-width"))).toBeLessThan(
+    5,
+  );
+  const after = (await body.boundingBox())!;
+  expect(after.x).toBeCloseTo(original.x, 1);
+  expect(after.y).toBeCloseTo(original.y, 1);
+  for (const axis of ["x", "y"]) {
+    const labels = await page
+      .locator(`[data-axis="${axis}"] text`)
+      .allTextContents();
+    expect(labels.length).toBeGreaterThan(2);
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(labels.some((l) => l.includes(",") || l.includes("e"))).toBe(true);
+  }
+  expect(await surface.innerHTML()).not.toMatch(/NaN|Infinity/);
+  expect(await page.locator(".scene-grid line").count()).toBeLessThan(100);
+  await page.getByTitle("Вписать траекторию", { exact: true }).click();
+  expect(
+    Number(await surface.getAttribute("data-world-width")),
+  ).toBeGreaterThan(1e4);
+});
+test("расширяемые границы, независимое точное значение и незавершённый ввод", async ({
+  page,
+}) => {
+  await page.goto(lab);
+  const exact = page.getByLabel("Начальная скорость: точное значение", {
+    exact: true,
+  });
+  const settings = page
+    .locator(".parameter")
+    .filter({ has: exact })
+    .locator("details");
+  await settings.locator("summary").click();
+  await page
+    .getByLabel("Начальная скорость: max", { exact: true })
+    .fill("5000");
+  await expect(
+    page.getByLabel("Начальная скорость", { exact: true }),
+  ).toHaveAttribute("max", "5000");
+  expect(
+    Number(
+      await page
+        .getByLabel("Начальная скорость", { exact: true })
+        .getAttribute("step"),
+    ),
+  ).toBeGreaterThanOrEqual(5);
+  await page
+    .getByLabel("Начальная скорость: step", { exact: true })
+    .fill("100");
+  await exact.fill("1234.567");
+  await expect(exact).toHaveValue("1234.567");
+  await expect(page.locator(".metric-primary")).toContainText(
+    "1 234,57".replace(" ", "\u00a0"),
+  );
+  await exact.fill("");
+  await expect(exact).toHaveValue("");
+  await exact.fill("-");
+  await expect(exact).toHaveValue("-");
+  await exact.blur();
+  await expect(page.getByRole("alert")).toContainText("Введите число");
+  await exact.fill("10001");
+  await expect(page.getByRole("alert")).toContainText("10000");
+  await exact.fill("1000.");
+  await expect(exact).toHaveValue("1000.");
+  await exact.fill("1000.25");
+  await expect(exact).toHaveValue("1000.25");
+  await page
+    .getByLabel("Начальная высота: точное значение", { exact: true })
+    .fill("1000000");
+  await page
+    .getByLabel("Гравитация: точное значение", { exact: true })
+    .fill("0.0001");
+  await expect(page.locator(".error-message")).toHaveCount(0);
+});
+test("перетаскивание вектора задаёт скорость выше 200 с устойчивым экранным размером", async ({
+  page,
+}) => {
+  await page.goto(lab);
+  const exact = page.getByLabel("Начальная скорость: точное значение", {
+    exact: true,
+  });
+  await exact.fill("190");
+  const b = (await page.locator('[data-drag="velocity"]').boundingBox())!,
+    body = (await page.locator(".body").boundingBox())!;
+  const x = b.x + b.width / 2,
+    y = b.y + b.height / 2,
+    cx = body.x + body.width / 2,
+    cy = body.y + body.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(cx + (x - cx) * 1.5, cy + (y - cy) * 1.5, { steps: 5 });
+  await page.mouse.up();
+  expect(Number(await exact.inputValue())).toBeGreaterThan(200);
+  expect(Number(await exact.inputValue())).toBeLessThanOrEqual(10000);
+});
+test("незавершённая траектория маркируется расчётным интервалом", async ({
+  page,
+}) => {
+  await page.goto(lab);
+  await page
+    .getByLabel("Начальная скорость: точное значение", { exact: true })
+    .fill("10000");
+  await page
+    .getByLabel("Гравитация: точное значение", { exact: true })
+    .fill("0.0001");
+  await expect(page.locator(".horizon-note")).toContainText(
+    "Приземление не найдено",
+  );
+  await expect(page.locator(".flight-stats")).toContainText(
+    "Пройденное расстояние по X за расчётный интервал",
+  );
+  await expect(page.locator(".flight-stats")).not.toContainText("Время полёта");
+});
+test("кривые разных запусков сохраняют временной порядок при немонотонной оси X", async ({
+  page,
+}) => {
+  await page.goto(lab);
+  await page.getByRole("tab", { name: "Анализ", exact: true }).click();
+  await page.getByRole("button", { name: "К сравнению", exact: true }).click();
+  await page
+    .getByLabel("Начальная скорость: точное значение", { exact: true })
+    .fill("50");
+  await page.getByLabel("График 1: ось X").selectOption("y");
+  await page.getByLabel("График 1: ось Y").selectOption("x");
+  const chart = page.locator(".chart-panel").first();
+  await expect(chart.locator(".recharts-line-curve")).toHaveCount(2);
+  const paths = await chart
+    .locator(".recharts-line-curve")
+    .evaluateAll((elements) => elements.map((e) => e.getAttribute("d")!));
+  expect(paths[0]).not.toBe(paths[1]);
+  for (const path of paths) {
+    const xs = [...path.matchAll(/[ML](-?[\d.]+),/g)].map((m) => Number(m[1]));
+    expect(xs.length).toBeGreaterThan(500);
+    expect(xs.some((v, i) => i > 0 && v < xs[i - 1] - 0.001)).toBe(true);
+    expect(xs.some((v, i) => i > 0 && v > xs[i - 1] + 0.001)).toBe(true);
+  }
+  await page.getByLabel("Временная шкала", { exact: true }).fill("1.5");
+  await expect
+    .poll(async () =>
+      Number(
+        await chart.locator(".chart-time-cursor").getAttribute("data-time"),
+      ),
+    )
+    .toBe(1.5);
+  await expect(page.getByTestId("hud-time")).toHaveText("1,50");
+});
+test("четыре графика и сравнения: кривые неподвижны, время и курсоры движутся, задержка кадра не теряет время", async ({
+  page,
+}) => {
+  await page.goto(lab);
+  await page
+    .getByLabel("Начальная скорость: точное значение", { exact: true })
+    .fill("100");
+  await page.getByRole("tab", { name: "Анализ", exact: true }).click();
+  for (let i = 0; i < 3; i++)
+    await page
+      .getByRole("button", { name: "К сравнению", exact: true })
+      .click();
+  await page.getByRole("button", { name: "График 2/4" }).click();
+  await page.getByRole("button", { name: "График 3/4" }).click();
+  const chart = page.locator(".recharts-line-curve").first(),
+    path = await chart.getAttribute("d");
+  await page.evaluate(() => {
+    const chart = document.querySelector(".recharts-wrapper")!;
+    (window as unknown as { chartMutations: number }).chartMutations = 0;
+    new MutationObserver((r) => {
+      (window as unknown as { chartMutations: number }).chartMutations +=
+        r.length;
+    }).observe(chart, {
+      subtree: true,
+      attributes: true,
+      childList: true,
+      characterData: true,
+    });
+  });
+  await page.getByRole("button", { name: "Запуск", exact: true }).click();
+  await page.waitForTimeout(200);
+  const before = Number(
+    await page.locator(".scene > svg").getAttribute("data-time"),
+  );
+  await page.evaluate(() => {
+    const until = performance.now() + 350;
+    while (performance.now() < until) {
+      /* deliberate main-thread delay */
+    }
+  });
+  await expect
+    .poll(async () =>
+      Number(await page.locator(".scene > svg").getAttribute("data-time")),
+    )
+    .toBeGreaterThan(before + 0.3);
+  await page.getByRole("button", { name: "Пауза", exact: true }).click();
+  const time = Number(
+    await page.locator(".scene > svg").getAttribute("data-time"),
+  );
+  for (const cursor of await page.locator(".chart-time-cursor").all())
+    await expect
+      .poll(async () => Number(await cursor.getAttribute("data-time")))
+      .toBe(time);
+  expect(await chart.getAttribute("d")).toBe(path);
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { chartMutations: number }).chartMutations,
+    ),
+  ).toBe(0);
+  await page.getByRole("button", { name: "Таблица", exact: true }).click();
+  await page.getByLabel("Шаг таблицы", { exact: true }).fill("0.01");
+  await page.getByRole("button", { name: "Запуск", exact: true }).click();
+  await page.waitForTimeout(200);
+  await expect(page.getByTestId("hud-time")).not.toHaveText("0,00");
+});
