@@ -1,8 +1,82 @@
-import { useState } from "react";
+import { memo, useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, SlidersHorizontal, RotateCcw, X } from "lucide-react";
 import { DEFAULTS } from "../physics/types";
 import type { Parameters } from "../physics/types";
+import { LIMITS } from "../physics/limits";
+import { niceStep } from "../utils/ticks";
 type Key = Exclude<keyof Parameters, "drag">;
+function NumericField({
+  value,
+  label,
+  validate,
+  commit,
+  id,
+}: {
+  value: number;
+  label: string;
+  validate: (n: number) => string;
+  commit: (n: number) => void;
+  id?: string;
+}) {
+  const [draft, setDraft] = useState(String(value)),
+    [error, setError] = useState("");
+  const submitted = useRef(value),
+    errorId = useId();
+  useEffect(() => {
+    if (value !== submitted.current) {
+      setDraft(String(value));
+      setError("");
+    }
+    submitted.current = value;
+  }, [value]);
+  const parse = (text: string) =>
+    text.trim() &&
+    /^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:e[+-]?\d+)?$/i.test(text.trim())
+      ? Number(text.replace(",", "."))
+      : NaN;
+  return (
+    <span className="numeric-field">
+      <input
+        id={id}
+        type="text"
+        inputMode="decimal"
+        aria-label={label}
+        value={draft}
+        aria-invalid={!!error}
+        aria-describedby={error ? errorId : undefined}
+        onChange={(e) => {
+          const text = e.target.value;
+          setDraft(text);
+          const number = parse(text),
+            issue = Number.isFinite(number) ? validate(number) : "";
+          setError(issue);
+          if (Number.isFinite(number) && !issue) {
+            submitted.current = number;
+            commit(number);
+          }
+        }}
+        onBlur={() => {
+          const number = parse(draft);
+          setError(
+            Number.isFinite(number) ? validate(number) : "Введите число.",
+          );
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") {
+            setDraft(String(value));
+            setError("");
+          }
+        }}
+      />
+      {error && (
+        <small id={errorId} className="field-error" role="alert">
+          {error}
+        </small>
+      )}
+    </span>
+  );
+}
 export function Parameter({
   label,
   symbol,
@@ -13,6 +87,8 @@ export function Parameter({
   step,
   onChange,
   hint,
+  safeMin = min,
+  safeMax = max,
 }: {
   label: string;
   symbol: string;
@@ -23,8 +99,32 @@ export function Parameter({
   step: number;
   onChange: (v: number) => void;
   hint?: string;
+  safeMin?: number;
+  safeMax?: number;
 }) {
-  const [bounds, setBounds] = useState({ min, max, step });
+  const [bounds, setBounds] = useState({ min, max, step }),
+    [autoStep, setAutoStep] = useState(true);
+  const validate = (n: number) =>
+    n >= safeMin && n <= safeMax
+      ? ""
+      : `Допустимо от ${safeMin} до ${safeMax}.`;
+  const automaticStep = (lo: number, hi: number) => niceStep((hi - lo) / 500);
+  const expand = (n: number) => {
+    onChange(n);
+    setBounds((b) => {
+      const lo = Math.min(b.min, n),
+        hi = Math.max(b.max, n);
+      return {
+        ...b,
+        min: lo,
+        max: hi,
+        step:
+          autoStep && (lo !== b.min || hi !== b.max)
+            ? automaticStep(lo, hi)
+            : b.step,
+      };
+    });
+  };
   return (
     <div className="parameter">
       <div className="parameter-label">
@@ -43,21 +143,12 @@ export function Parameter({
           value={Math.max(bounds.min, Math.min(bounds.max, value))}
           onChange={(e) => onChange(+e.target.value)}
         />
-        <input
+        <NumericField
           id={`input-${symbol}`}
-          aria-label={`${label}: точное значение`}
-          type="number"
-          min={min}
-          max={max}
-          step={step}
+          label={`${label}: точное значение`}
           value={value}
-          onChange={(e) => {
-            if (
-              e.target.value !== "" &&
-              Number.isFinite(e.target.valueAsNumber)
-            )
-              onChange(Math.max(min, Math.min(max, e.target.valueAsNumber)));
-          }}
+          validate={validate}
+          commit={expand}
         />
       </div>
       <details className="range-settings">
@@ -66,21 +157,33 @@ export function Parameter({
           {(["min", "max", "step"] as const).map((k, i) => (
             <label key={k}>
               {["От", "До", "Шаг"][i]}
-              <input
-                type="number"
-                aria-label={`${label}: ${k}`}
+              <NumericField
+                label={`${label}: ${k}`}
                 value={bounds[k]}
-                onChange={(e) => {
-                  const v = e.target.valueAsNumber;
-                  if (
-                    Number.isFinite(v) &&
-                    (k === "step"
-                      ? v > 0
-                      : k === "min"
-                        ? v >= min && v < bounds.max
-                        : v <= max && v > bounds.min)
-                  )
-                    setBounds((b) => ({ ...b, [k]: v }));
+                validate={(n) => {
+                  if (k === "step")
+                    return n > 0 && n <= bounds.max - bounds.min
+                      ? ""
+                      : "Шаг должен быть положительным и не больше диапазона.";
+                  return (
+                    validate(n) ||
+                    ((k === "min" ? n < bounds.max : n > bounds.min)
+                      ? ""
+                      : "Нижняя граница должна быть меньше верхней.")
+                  );
+                }}
+                commit={(n) => {
+                  if (k === "step") setAutoStep(false);
+                  setBounds((b) => {
+                    const next = { ...b, [k]: n };
+                    return {
+                      ...next,
+                      step:
+                        k !== "step" && autoStep
+                          ? automaticStep(next.min, next.max)
+                          : next.step,
+                    };
+                  });
                 }}
               />
             </label>
@@ -90,7 +193,7 @@ export function Parameter({
     </div>
   );
 }
-export default function ParametersPanel({
+function ParametersPanel({
   params,
   update,
   close,
@@ -115,6 +218,8 @@ export default function ParametersPanel({
     <Parameter
       key={key}
       {...{ label, symbol, unit, min, max, step, hint }}
+      safeMin={LIMITS[key].min}
+      safeMax={LIMITS[key].max}
       value={params[key]}
       onChange={(v) => update({ [key]: v })}
     />
@@ -232,3 +337,5 @@ export default function ParametersPanel({
     </>
   );
 }
+
+export default memo(ParametersPanel);

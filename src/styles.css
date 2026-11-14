@@ -2923,3 +2923,61 @@ tbody tr:hover {
 .chart-area {
   position: relative;
 }
+/* Wheel scroll chains naturally from panels and tables to the page. */
+.side-panel,
+.table-scroll {
+  overscroll-behavior: auto;
+}
+.numeric-field {
+  display: inline-flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.range-row > .numeric-field {
+  width: 87px;
+  flex-shrink: 0;
+}
+.numeric-field input {
+  width: 100%;
+  min-width: 0;
+  font-size: 12px;
+  padding: 5px 3px;
+  font-variant-numeric: tabular-nums;
+}
+.range-row .numeric-field input {
+  text-align: center;
+}
+.field-error {
+  color: var(--danger, #dc718b);
+  font-size: 9px;
+  line-height: 1.4;
+  margin-top: 4px;
+}
+.range-settings .numeric-field {
+  width: 100%;
+}
+.chart-overlay {
+  position: absolute;
+  left: 68px;
+  top: 15px;
+  width: calc(100% - 88px);
+  height: calc(100% - 45px);
+  overflow: hidden;
+  pointer-events: none;
+}
+.scene-scale {
+  position: absolute;
+  top: 43px;
+  left: 24px;
+  color: var(--muted);
+  font-size: 9px;
+  pointer-events: none;
+  opacity: 0.7;
+}
+@media (max-width: 700px) {
+  .scene-scale {
+    top: 36px;
+    left: 15px;
+    font-size: 8px;
+  }
+}

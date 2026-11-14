@@ -9,7 +9,7 @@ export default defineConfig({
     browserName: "chromium",
     launchOptions: {
       executablePath:
-        process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "/usr/bin/chromium",
+        process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
       args: ["--no-sandbox"],
     },
   },

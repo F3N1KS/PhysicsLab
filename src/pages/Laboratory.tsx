@@ -1,4 +1,13 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useLayoutEffect,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Activity,
   ArrowDown,
@@ -91,11 +100,19 @@ export default function Laboratory() {
   const { flight } = result,
     playback = usePlayback(flight.duration),
     current = flight.at(playback.time);
-  const update = (patch: Partial<Parameters>) => {
-    playback.reset();
-    setParams((p) => ({ ...p, ...patch }));
-  };
-  const addRun = () => {
+  const clock = useRef(0);
+  useLayoutEffect(() => {
+    clock.current = playback.time;
+  }, [playback.time]);
+  const closeParameters = useCallback(() => setLeft(false), []);
+  const update = useCallback(
+    (patch: Partial<Parameters>) => {
+      playback.reset();
+      setParams((p) => ({ ...p, ...patch }));
+    },
+    [playback.reset],
+  );
+  const addRun = useCallback(() => {
     const id = serial.current++;
     setRuns((r) => [
       ...r.slice(-5),
@@ -115,7 +132,7 @@ export default function Laboratory() {
       },
     ]);
     setToast("Запуск добавлен к сравнению");
-  };
+  }, [flight, params]);
   const resize = (side: "left" | "right", event: React.PointerEvent) => {
     const start = event.clientX,
       width = widths[side];
@@ -292,7 +309,7 @@ export default function Laboratory() {
             <ParametersPanel
               params={params}
               update={update}
-              close={() => setLeft(false)}
+              close={closeParameters}
               custom={!!model}
             />
             <div
@@ -458,8 +475,18 @@ export default function Laboratory() {
               <div className="flight-stats">
                 {[
                   ["Макс. высота", flight.maxHeight, "м"],
-                  ["Дальность", flight.range, "м"],
-                  ["Время полёта", flight.duration, "с"],
+                  [
+                    flight.landed
+                      ? "Дальность"
+                      : "Пройденное расстояние по X за расчётный интервал",
+                    flight.range,
+                    "м",
+                  ],
+                  [
+                    flight.landed ? "Время полёта" : "Расчётный интервал",
+                    flight.duration,
+                    "с",
+                  ],
                 ].map(([name, value, unit]) => (
                   <div key={name}>
                     <span>{name}</span>
@@ -585,7 +612,7 @@ export default function Laboratory() {
         >
           <Analysis
             {...{ flight, params, runs, setRuns, addRun }}
-            time={playback.time}
+            clock={clock}
             seek={playback.seek}
           />
         </Suspense>

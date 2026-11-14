@@ -1,4 +1,6 @@
 import type { Flight, Model, Parameters, State } from "./types";
+import { LIMITS, STANDARD_HORIZON } from "./limits";
+import type { ParameterKey } from "./limits";
 import { compile } from "./expression";
 type Vector = [number, number, number, number];
 export function rk4(
@@ -26,7 +28,7 @@ function state(
 ): State {
   if (
     ![...v, ax, ay].every(Number.isFinite) ||
-    v.some((n) => Math.abs(n) > 1e8)
+    v.some((n) => Math.abs(n) > 1e14)
   )
     throw new Error("Модель неустойчива: уменьшите шаг или величины сил.");
   const [x, y, vx, vy] = v,
@@ -48,19 +50,12 @@ function state(
   };
 }
 export function calculate(p: Parameters, model?: Model): Flight {
-  if (
-    !Object.values(p).every(
-      (v) => typeof v === "boolean" || Number.isFinite(v),
-    ) ||
-    p.mass < 0.001 ||
-    p.g <= 0 ||
-    p.height < 0 ||
-    p.speed < 0 ||
-    p.k < 0
-  )
-    throw new Error(
-      "Проверьте физические параметры: m ≥ 0,001, g > 0, h ≥ 0, k ≥ 0.",
-    );
+  for (const key of Object.keys(LIMITS) as ParameterKey[]) {
+    const value = p[key],
+      { min, max } = LIMITS[key];
+    if (!Number.isFinite(value) || value < min || value > max)
+      throw new Error(`Параметр ${key}: допустимый диапазон ${min}…${max}.`);
+  }
   const rad = (p.angle * Math.PI) / 180,
     vx = p.speed * Math.cos(rad),
     vy = p.speed * Math.sin(rad);
@@ -75,18 +70,33 @@ export function calculate(p: Parameters, model?: Model): Flight {
         : (t - q) / b;
     const ax0 = -b * (vx - p.windX),
       ay0 = -p.g - b * (vy - p.windY);
-    const exp = Math.exp(-z),
-      vxt = vx + ax0 * q,
-      vyt = vy + ay0 * q;
+    const exp = Math.exp(-z);
+    // At strong damping use terminal velocity directly to avoid cancellation.
+    const terminalX = p.windX,
+      terminalY = p.windY - p.g / b;
+    const strong = z >= 1e-3;
+    const vxt = strong ? terminalX + (vx - terminalX) * exp : vx + ax0 * q;
+    const vyt = strong ? terminalY + (vy - terminalY) * exp : vy + ay0 * q;
     return {
       ...state(
         p,
         t,
-        [p.x0 + vx * t + ax0 * r, p.height + vy * t + ay0 * r, vxt, vyt],
+        [
+          strong
+            ? p.x0 + terminalX * t + (vx - terminalX) * q
+            : p.x0 + vx * t + ax0 * r,
+          strong
+            ? p.height + terminalY * t + (vy - terminalY) * q
+            : p.height + vy * t + ay0 * r,
+          vxt,
+          vyt,
+        ],
         ax0 * exp,
         ay0 * exp,
       ),
-      y: p.height + vy * t + ay0 * r,
+      y: strong
+        ? p.height + terminalY * t + (vy - terminalY) * q
+        : p.height + vy * t + ay0 * r,
     };
   };
   let at: (t: number) => State = raw,
@@ -139,6 +149,8 @@ export function calculate(p: Parameters, model?: Model): Flight {
       fx = compile(model.fx, names),
       fy = compile(model.fy, names);
     const derivative = (t: number, s: Vector): Vector => {
+      if (!s.every(Number.isFinite) || s.some((v) => Math.abs(v) > 1e8))
+        throw new Error("Модель неустойчива: уменьшите шаг или величины сил.");
       const [x, y, vxx, vyy] = s,
         vars = {
           ...model.constants,
@@ -206,7 +218,8 @@ export function calculate(p: Parameters, model?: Model): Flight {
       duration = 0;
     } else {
       let hi = 0.01;
-      while (hi < 300 && raw(hi).y > 0) hi = Math.min(300, hi * 2);
+      while (hi < STANDARD_HORIZON && raw(hi).y > 0)
+        hi = Math.min(STANDARD_HORIZON, hi * 2);
       if (raw(hi).y <= 0) {
         let lo = 0;
         for (let j = 0; j < 60; j++) {
@@ -216,7 +229,7 @@ export function calculate(p: Parameters, model?: Model): Flight {
         }
         duration = (lo + hi) / 2;
         landed = true;
-      } else duration = 300;
+      } else duration = STANDARD_HORIZON;
     }
   }
   const evaluate = at;

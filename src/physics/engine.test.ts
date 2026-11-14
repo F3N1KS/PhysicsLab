@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { calculate } from "./engine";
 import { DEFAULTS, DEFAULT_MODEL } from "./types";
+import { LIMITS, STANDARD_HORIZON } from "./limits";
+import type { ParameterKey } from "./limits";
 import { compile } from "./expression";
 describe("Аналитическая механика", () => {
   it("правильно считает бросок под углом, время, высоту и дальность", () => {
@@ -76,7 +78,7 @@ describe("Линейное сопротивление", () => {
   it("сообщает о неприземляющемся теле и ограничивает горизонт", () => {
     const f = calculate({ ...DEFAULTS, drag: true, k: 2, windY: 20 });
     expect(f.landed).toBe(false);
-    expect(f.duration).toBe(300);
+    expect(f.duration).toBe(STANDARD_HORIZON);
   });
 });
 describe("Пользовательская модель RK4", () => {
@@ -145,5 +147,76 @@ describe("Безопасный парсер", () => {
     expect(() => compile("sqrt(-1)", [])({})).toThrow();
     expect(() => compile("1/0", [])({})).toThrow();
     expect(() => compile("1+".repeat(200), [])).toThrow();
+  });
+});
+
+describe("Расширенные безопасные параметры", () => {
+  it("считает завершённый полёт дольше прежних 300 секунд", () => {
+    const f = calculate({ ...DEFAULTS, speed: 5000 });
+    expect(f.duration).toBeGreaterThan(300);
+    expect(f.landed).toBe(true);
+    expect(f.range).toBeCloseTo(5000 ** 2 / 9.81, 5);
+    expect(f.at(f.duration).y).toBeLessThan(1e-6);
+  });
+  it("точно считает падение с миллиона метров при малой гравитации", () => {
+    const f = calculate({
+      ...DEFAULTS,
+      height: 1e6,
+      speed: 0,
+      g: 0.0001,
+      mass: 1e6,
+      x0: -1e6,
+    });
+    expect(f.landed).toBe(true);
+    expect(f.duration).toBeCloseTo(Math.sqrt(2e6 / 0.0001), 5);
+    expect(
+      f.samples.every((s) => Object.values(s).every(Number.isFinite)),
+    ).toBe(true);
+  });
+  it("сохраняет устойчивость при максимальном сопротивлении и минимальной массе", () => {
+    const f = calculate({
+      ...DEFAULTS,
+      height: 100,
+      drag: true,
+      k: 1e5,
+      mass: 0.001,
+    });
+    expect(f.landed).toBe(false);
+    expect(f.at(100).vy).toBeCloseTo(-9.81 / 1e8, 12);
+    expect(f.at(100).y).toBeCloseTo(
+      100 + 25 / Math.sqrt(2) / 1e8 - (9.81 / 1e8) * 100,
+      8,
+    );
+  });
+  it("ограничивает очень длинный и неприземляющийся полёт честным интервалом", () => {
+    const f = calculate({ ...DEFAULTS, speed: 10000, g: 0.0001 });
+    expect(f.landed).toBe(false);
+    expect(f.duration).toBe(STANDARD_HORIZON);
+    expect(f.at(f.duration).y).toBeGreaterThan(0);
+  });
+  for (const key of Object.keys(LIMITS) as ParameterKey[]) {
+    it(`проверяет абсолютные границы ${key} в движке`, () => {
+      const { min, max } = LIMITS[key];
+      for (const value of [min, max])
+        expect(() => calculate({ ...DEFAULTS, [key]: value })).not.toThrow();
+      for (const value of [
+        min - Math.max(1, Math.abs(min) * 0.1),
+        max * 1.1 + 1,
+        NaN,
+        Infinity,
+      ])
+        expect(() => calculate({ ...DEFAULTS, [key]: value })).toThrow();
+    });
+  }
+  it("сохраняет пределы RK4 и парсера с расширенными параметрами", () => {
+    const p = { ...DEFAULTS, speed: 1000, height: 1e6, mass: 0.001 };
+    const model = { ...DEFAULT_MODEL, fx: "0", fy: "-m*g", duration: 1 };
+    expect(calculate(p, model).at(0.5).x).toBeCloseTo(
+      calculate(p).at(0.5).x,
+      7,
+    );
+    expect(() =>
+      calculate(p, { ...model, fy: "1e10", duration: 120 }),
+    ).toThrow();
   });
 });
