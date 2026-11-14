@@ -1,7 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Crosshair, Minus, Plus, Move, RotateCcw } from "lucide-react";
 import type { Flight, Parameters, State } from "../physics/types";
 import { fmt } from "../physics/types";
+import { clampParameter } from "../physics/limits";
+import { fitCamera, screen, world as toWorld, zoomAt } from "../utils/camera";
+import type { Camera } from "../utils/camera";
+import { formatTick, niceStep, ticks } from "../utils/ticks";
+import { projectedLine, trajectory } from "../utils/trajectory";
 export interface Layers {
   trajectory: boolean;
   velocity: boolean;
@@ -42,14 +47,15 @@ export default function Scene({
 }: Props) {
   const ref = useRef<HTMLDivElement>(null),
     [size, setSize] = useState({ w: 1000, h: 600 });
-  const [camera, setCamera] = useState({ zoom: 1, x: 0, y: 0 }),
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [camera, setCamera] = useState<Camera>(),
     [info, setInfo] = useState(false);
-  const [frame, setFrame] = useState<{
-    min: number;
-    max: number;
-    height: number;
-  }>();
-  const drag = useRef<{ mode: string; x: number; y: number } | null>(null);
+  const drag = useRef<{
+    mode: string;
+    x: number;
+    y: number;
+    multiplier: number;
+  } | null>(null);
   useEffect(() => {
     const observer = new ResizeObserver(([e]) =>
       setSize({ w: e.contentRect.width, h: e.contentRect.height }),
@@ -57,143 +63,108 @@ export default function Scene({
     if (ref.current) observer.observe(ref.current);
     return () => observer.disconnect();
   }, []);
-  const { w, h } = size,
-    minX = frame?.min ?? Math.min(params.x0, ...flight.samples.map((s) => s.x)),
-    maxX =
-      frame?.max ?? Math.max(params.x0 + 10, ...flight.samples.map((s) => s.x));
-  const scale =
-    Math.min(
-      (w - 120) / Math.max(15, maxX - minX),
-      (h - 150) / Math.max(10, frame?.height ?? flight.maxHeight),
-    ) * camera.zoom;
-  const sx = (x: number) => 64 + (x - minX) * scale + camera.x,
-    sy = (y: number) => h - 68 - y * scale + camera.y;
-  const world = (x: number, y: number) => ({
-    x: (x - 64 - camera.x) / scale + minX,
-    y: (h - 68 + camera.y - y) / scale,
-  });
-  const line = (s: State[]) =>
-    s
-      .map(
-        (v, i) => `${i ? "L" : "M"}${sx(v.x).toFixed(2)},${sy(v.y).toFixed(2)}`,
-      )
-      .join(" ");
-  const sampledMax = Math.max(...flight.samples.map((s) => s.y));
-  const traveled = [...flight.samples.filter((s) => s.t < current.t), current];
-  const step = 10 ** Math.floor(Math.log10(70 / Math.max(0.01, scale))),
-    grid = step * (step * scale < 30 ? 5 : step * scale < 55 ? 2 : 1);
-  const xl = world(0, 0).x,
-    xr = world(w, 0).x,
-    yb = Math.max(0, world(0, h).y),
-    yt = world(0, 0).y;
-  const xs = Array.from(
-    { length: Math.min(100, Math.max(0, Math.ceil((xr - xl) / grid))) },
-    (_, i) => Math.ceil(xl / grid) * grid + i * grid,
+  const { w, h } = size;
+  const bounds = useMemo(
+    () => ({
+      min: Math.min(params.x0, ...flight.samples.map((s) => s.x)),
+      max: Math.max(params.x0 + 10, ...flight.samples.map((s) => s.x)),
+    }),
+    [flight, params.x0],
   );
-  const ys = Array.from(
-    { length: Math.min(100, Math.max(0, Math.ceil((yt - yb) / grid))) },
-    (_, i) => Math.ceil(yb / grid) * grid + i * grid,
+  const minX = bounds.min;
+  const view = useMemo(
+    () => camera ?? fitCamera(size, bounds.min, bounds.max, flight.maxHeight),
+    [camera, size, bounds, flight],
   );
-  const rad = (params.angle * Math.PI) / 180,
-    launch = {
-      x: sx(params.x0 + params.speed * Math.cos(rad) * 0.65),
-      y: sy(params.height + params.speed * Math.sin(rad) * 0.65),
+  const scale = view.scale;
+  const sx = (x: number) => screen(view, size, x, 0).x,
+    sy = (y: number) => screen(view, size, 0, y).y;
+  const world = (x: number, y: number) => toWorld(view, size, x, y);
+  const line = (states: State[]) => projectedLine(states, view, size);
+  const geometry = useMemo(
+    () => trajectory(flight, view, size),
+    [flight, view, size],
+  );
+  const predicted = useMemo(
+    () => projectedLine(geometry, view, size),
+    [geometry, view, size],
+  );
+  const traveled = [...geometry.filter((s) => s.t < current.t), current];
+  const sampledMax = useMemo(
+    () => Math.max(...flight.samples.map((s) => s.y)),
+    [flight],
+  );
+  const grid = Math.max(
+    niceStep(100 / scale),
+    Math.max(Math.abs(view.x), Math.abs(view.y))
+      ? niceStep(
+          Math.max(Math.abs(view.x), Math.abs(view.y)) * Number.EPSILON * 4,
+        )
+      : 0,
+  );
+  const xs = ticks(world(0, 0).x, world(w, 0).x, grid),
+    ys = ticks(world(0, h).y, world(0, 0).y, grid);
+  const rad = (params.angle * Math.PI) / 180;
+  // Keep the velocity handle reachable on both astronomical and microscopic views.
+  const vectorSeconds =
+    Math.max(50, Math.min(140, params.speed * scale * 0.65)) /
+    (Math.max(params.speed, 1) * scale);
+  const launch = {
+    x: sx(params.x0 + params.speed * Math.cos(rad) * vectorSeconds),
+    y: sy(params.height + params.speed * Math.sin(rad) * vectorSeconds),
+  };
+  useEffect(() => {
+    const surface = svgRef.current;
+    if (!surface) return;
+    const wheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = surface.getBoundingClientRect();
+      const delta =
+        e.deltaY *
+        (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? rect.height : 1);
+      setCamera((c) =>
+        zoomAt(
+          c ?? view,
+          size,
+          Math.exp(-Math.max(-500, Math.min(500, delta)) * 0.002),
+          ((e.clientX - rect.left) * w) / rect.width,
+          ((e.clientY - rect.top) * h) / rect.height,
+        ),
+      );
     };
+    surface.addEventListener("wheel", wheel, { passive: false });
+    return () => surface.removeEventListener("wheel", wheel);
+  }, [view, size, w, h]);
   const arrow = (
     dx: number,
     dy: number,
     color: string,
     label: string,
     multiplier: number,
-  ) => (
-    <g className="vector" key={label} style={{ color }}>
-      <line
-        x1={sx(current.x)}
-        y1={sy(current.y)}
-        x2={sx(current.x + dx * multiplier)}
-        y2={sy(current.y + dy * multiplier)}
-        markerEnd={`url(#arrow-${color.replace("#", "")})`}
-      />
-      <text
-        x={sx(current.x + dx * multiplier) + 9}
-        y={sy(current.y + dy * multiplier) - 8}
-      >
-        {label}
-      </text>
-    </g>
-  );
-  return (
-    <div className="scene" ref={ref} data-testid="scene">
-      <div className="scene-heading">
-        <span className="live-dot" /> СИМУЛЯЦИЯ 02D{" "}
-        <span className="scene-model">
-          {custom
-            ? "Пользовательская модель"
-            : params.drag
-              ? "Линейное сопротивление"
-              : "Идеальная среда"}
-        </span>
-      </div>
-      <svg
-        width="100%"
-        height="100%"
-        viewBox={`0 0 ${w} ${h}`}
-        role="img"
-        aria-label="Интерактивная траектория броска тела"
-        onWheel={(e) =>
-          setCamera((c) => ({
-            ...c,
-            zoom: Math.max(
-              0.25,
-              Math.min(8, c.zoom * (e.deltaY > 0 ? 0.9 : 1.1)),
-            ),
-          }))
-        }
-        onPointerDown={(e) => {
-          const target = e.target as Element;
-          if (target.hasAttribute("data-drag") && !frame)
-            setFrame({ min: minX, max: maxX, height: flight.maxHeight });
-          drag.current = {
-            mode: target.getAttribute("data-drag") || "pan",
-            x: e.clientX,
-            y: e.clientY,
-          };
-          e.currentTarget.setPointerCapture(e.pointerId);
-        }}
-        onPointerMove={(e) => {
-          if (!drag.current) return;
-          const rect = e.currentTarget.getBoundingClientRect(),
-            p = world(e.clientX - rect.left, e.clientY - rect.top);
-          if (drag.current.mode === "launch")
-            onParams?.({
-              x0: Math.max(-1000, Math.min(1000, p.x)),
-              height: Math.max(0, Math.min(1000, p.y)),
-            });
-          else if (drag.current.mode === "velocity") {
-            const dx = p.x - params.x0,
-              dy = p.y - params.height;
-            onParams?.({
-              speed: Math.min(200, Math.hypot(dx, dy) / 0.65),
-              angle: Math.max(
-                -90,
-                Math.min(180, (Math.atan2(dy, dx) * 180) / Math.PI),
-              ),
-            });
-          } else {
-            const dx = e.clientX - drag.current.x,
-              dy = e.clientY - drag.current.y;
-            setCamera((c) => ({ ...c, x: c.x + dx, y: c.y + dy }));
-          }
-          drag.current.x = e.clientX;
-          drag.current.y = e.clientY;
-        }}
-        onPointerUp={() => {
-          drag.current = null;
-        }}
-        onPointerCancel={() => {
-          drag.current = null;
-        }}
-      >
+  ) => {
+    const magnitude = Math.hypot(dx, dy) * scale * multiplier;
+    multiplier *= Math.min(1, 160 / Math.max(1, magnitude));
+    return (
+      <g className="vector" key={label} style={{ color }}>
+        <line
+          x1={sx(current.x)}
+          y1={sy(current.y)}
+          x2={sx(current.x + dx * multiplier)}
+          y2={sy(current.y + dy * multiplier)}
+          markerEnd={`url(#arrow-${color.replace("#", "")})`}
+        />
+        <text
+          x={sx(current.x + dx * multiplier) + 9}
+          y={sy(current.y + dy * multiplier) - 8}
+        >
+          {label}
+        </text>
+      </g>
+    );
+  };
+  const staticScene = useMemo(
+    () => (
+      <>
         <defs>
           <radialGradient id="ball">
             <stop stopColor="#fff" />
@@ -223,27 +194,27 @@ export default function Scene({
             </marker>
           ))}
         </defs>
-        <g className="scene-grid">
+        <g className="scene-grid" data-grid-step={grid}>
           {xs.map((x) => (
-            <g key={x}>
+            <g key={x} data-axis="x">
               <line x1={sx(x)} x2={sx(x)} y1="0" y2={h} />
               <text
                 x={sx(x) + 5}
                 y={Math.min(h - 17, Math.max(30, sy(0) + 23))}
               >
-                {fmt(x, 0)}
+                {formatTick(x, grid)}
               </text>
             </g>
           ))}
           {ys.map((y) => (
-            <g key={y}>
+            <g key={y} data-axis="y">
               <line x1="0" x2={w} y1={sy(y)} y2={sy(y)} />
               <text
                 visibility={sy(y) < 80 ? "hidden" : "visible"}
                 x={Math.max(12, Math.min(w - 35, sx(minX) - 30))}
                 y={sy(y) - 6}
               >
-                {fmt(y, 0)}
+                {formatTick(y, grid)}
               </text>
             </g>
           ))}
@@ -259,9 +230,7 @@ export default function Scene({
         <text className="axis-label" x="20" y="68">
           Y, м
         </text>
-        {layers.trajectory && (
-          <path className="predicted" d={line(flight.samples)} />
-        )}
+        {layers.trajectory && <path className="predicted" d={predicted} />}
         {layers.ghosts &&
           flight.samples
             .filter((_, i) => i % 40 === 0)
@@ -306,6 +275,91 @@ export default function Scene({
               ))}
           </g>
         )}
+      </>
+    ),
+    [view, size, flight, layers, predicted, params.x0, minX, sampledMax],
+  );
+  return (
+    <div className="scene" ref={ref} data-testid="scene">
+      <div className="scene-heading">
+        <span className="live-dot" /> СИМУЛЯЦИЯ 02D{" "}
+        <span className="scene-model">
+          {custom
+            ? "Пользовательская модель"
+            : params.drag
+              ? "Линейное сопротивление"
+              : "Идеальная среда"}
+        </span>
+      </div>
+      <svg
+        ref={svgRef}
+        data-scale={scale}
+        data-camera-x={view.x}
+        data-camera-y={view.y}
+        data-world-width={w / scale}
+        data-time={current.t}
+        width="100%"
+        height="100%"
+        viewBox={`0 0 ${w} ${h}`}
+        role="img"
+        aria-label="Интерактивная траектория броска тела"
+        onPointerDown={(e) => {
+          const target = e.target as Element;
+          setCamera(view);
+          drag.current = {
+            mode: target.getAttribute("data-drag") || "pan",
+            x: e.clientX,
+            y: e.clientY,
+            multiplier: vectorSeconds,
+          };
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          if (!drag.current) return;
+          const rect = e.currentTarget.getBoundingClientRect(),
+            p = world(
+              ((e.clientX - rect.left) * w) / rect.width,
+              ((e.clientY - rect.top) * h) / rect.height,
+            );
+          if (drag.current.mode === "launch")
+            onParams?.({
+              x0: clampParameter("x0", p.x),
+              height: clampParameter("height", p.y),
+            });
+          else if (drag.current.mode === "velocity") {
+            const dx = p.x - params.x0,
+              dy = p.y - params.height;
+            onParams?.({
+              speed: clampParameter(
+                "speed",
+                Math.hypot(dx, dy) / drag.current.multiplier,
+              ),
+              angle: Math.max(
+                -90,
+                Math.min(180, (Math.atan2(dy, dx) * 180) / Math.PI),
+              ),
+            });
+          } else {
+            const dx = e.clientX - drag.current.x,
+              dy = e.clientY - drag.current.y;
+            setCamera((c) => ({
+              ...view,
+              ...c,
+              x: (c ?? view).x - dx / scale,
+              y: (c ?? view).y + dy / scale,
+            }));
+          }
+          drag.current.x = e.clientX;
+          drag.current.y = e.clientY;
+        }}
+        onPointerUp={() => {
+          drag.current = null;
+        }}
+        onPointerCancel={() => {
+          drag.current = null;
+        }}
+      >
+        {staticScene}
         <path className="trail-glow" d={line(traveled.slice(-60))} />
         <path className="trail" d={line(traveled)} />
         {traveled
@@ -346,7 +400,7 @@ export default function Scene({
             current.vy,
             "#5bd8f5",
             current.t === 0 ? "v₀" : "v",
-            0.65,
+            vectorSeconds,
           )}
         {layers.acceleration &&
           arrow(current.ax, current.ay, "#b39aff", "a", 0.65)}
@@ -398,17 +452,23 @@ export default function Scene({
           </g>
         )}
       </svg>
+      <span className="scene-scale">
+        100 px = {formatTick(100 / scale, niceStep(0.1 / scale))} м
+      </span>
       <div className="scene-footer">
         <span>
           <Move size={13} /> Перетаскивание · камера
         </span>
-        <span>Векторы: v × 0,65 с · a × 0,65 с² · F × 0,4 м/Н</span>
+        <span>
+          v × {formatTick(vectorSeconds, niceStep(vectorSeconds / 100))} с ·
+          длина векторов адаптируется
+        </span>
       </div>
       <div className="camera-controls">
         <button
           title="Уменьшить масштаб"
           onClick={() =>
-            setCamera((c) => ({ ...c, zoom: Math.max(0.25, c.zoom / 1.25) }))
+            setCamera((c) => zoomAt(c ?? view, size, 1 / 1.25, w / 2, h / 2))
           }
         >
           <Minus size={16} />
@@ -416,8 +476,7 @@ export default function Scene({
         <button
           title="Вписать траекторию"
           onClick={() => {
-            setCamera({ zoom: 1, x: 0, y: 0 });
-            setFrame(undefined);
+            setCamera(undefined);
           }}
         >
           <Crosshair size={16} />
@@ -425,7 +484,7 @@ export default function Scene({
         <button
           title="Увеличить масштаб"
           onClick={() =>
-            setCamera((c) => ({ ...c, zoom: Math.min(8, c.zoom * 1.25) }))
+            setCamera((c) => zoomAt(c ?? view, size, 1.25, w / 2, h / 2))
           }
         >
           <Plus size={16} />
@@ -433,8 +492,7 @@ export default function Scene({
         <button
           title="Сбросить камеру"
           onClick={() => {
-            setCamera({ zoom: 1, x: 0, y: 0 });
-            setFrame(undefined);
+            setCamera(undefined);
           }}
         >
           <RotateCcw size={14} />

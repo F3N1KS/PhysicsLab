@@ -1,4 +1,4 @@
-import { useMemo, useState, useRef } from "react";
+import { memo, useEffect, useMemo, useState, useRef } from "react";
 import {
   CartesianGrid,
   Line,
@@ -6,10 +6,11 @@ import {
   ResponsiveContainer,
   XAxis,
   YAxis,
-  ReferenceLine,
 } from "recharts";
 import { Download, Plus, Minus, Maximize2, X, Trash2 } from "lucide-react";
 import type { Flight, Parameters, Run, State } from "../physics/types";
+import type { RefObject } from "react";
+import { axisTicks, formatTick } from "../utils/ticks";
 import { fmt, LABELS } from "../physics/types";
 export function downloadFile(content: BlobPart, type: string, name: string) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -19,17 +20,132 @@ export function downloadFile(content: BlobPart, type: string, name: string) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
+type Series = { name: string; color: string; flight: Flight; id?: number }[];
+type Domains = {
+  x: ReturnType<typeof axisTicks>;
+  y: ReturnType<typeof axisTicks>;
+};
+const StaticPlot = memo(function StaticPlot({
+  series,
+  x,
+  y,
+  domains,
+}: {
+  series: Series;
+  x: keyof State;
+  y: keyof State;
+  domains: Domains;
+}) {
+  return (
+    <ResponsiveContainer width="100%" height="100%">
+      <LineChart
+        margin={{ top: 15, right: 20, left: 0, bottom: 0 }}
+        accessibilityLayer={false}
+      >
+        <CartesianGrid stroke="var(--grid)" vertical={false} />
+        <XAxis
+          dataKey={x}
+          type="number"
+          domain={[domains.x.min, domains.x.max]}
+          ticks={domains.x.values}
+          height={30}
+          allowDataOverflow
+          tickFormatter={(v) => formatTick(v, domains.x.step)}
+          stroke="var(--muted)"
+          fontSize={11}
+          minTickGap={25}
+        />
+        <YAxis
+          type="number"
+          domain={[domains.y.min, domains.y.max]}
+          ticks={domains.y.values}
+          allowDataOverflow
+          tickFormatter={(v) => formatTick(v, domains.y.step)}
+          width={68}
+          stroke="var(--muted)"
+          fontSize={11}
+        />
+        {series.map((run, i) => (
+          <Line
+            key={run.id ?? "current"}
+            name={run.name}
+            data={run.flight.samples}
+            dataKey={y}
+            type="linear"
+            stroke={run.color}
+            strokeWidth={i ? 1.7 : 2.5}
+            dot={false}
+            activeDot={false}
+            isAnimationActive={false}
+          />
+        ))}
+      </LineChart>
+    </ResponsiveContainer>
+  );
+});
+function ChartCursor({
+  flight,
+  clock,
+  x,
+  xMin,
+  xMax,
+}: {
+  flight: Flight;
+  clock: RefObject<number>;
+  x: keyof State;
+  xMin: number;
+  xMax: number;
+}) {
+  const ref = useRef<SVGLineElement>(null);
+  useEffect(() => {
+    let id: number,
+      last = -Infinity;
+    const tick = (now: number) => {
+      if (now - last >= 1000 / 30 && ref.current) {
+        const time = clock.current,
+          percent = ((flight.at(time)[x] - xMin) / (xMax - xMin)) * 100;
+        ref.current.setAttribute("x1", `${percent}%`);
+        ref.current.setAttribute("x2", `${percent}%`);
+        ref.current.setAttribute("data-time", String(time));
+        last = now;
+      }
+      id = requestAnimationFrame(tick);
+    };
+    id = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(id);
+  }, [flight, clock, x, xMin, xMax]);
+  return (
+    <svg className="chart-overlay" aria-hidden="true">
+      <line
+        className="chart-time-cursor"
+        ref={ref}
+        x1="0"
+        x2="0"
+        y1="0"
+        y2="100%"
+        stroke="#b39aff"
+        strokeDasharray="4 4"
+      />
+    </svg>
+  );
+}
+function makeTable(flight: Flight, step: number) {
+  return Array.from(
+    { length: Math.min(5001, Math.floor(flight.duration / step) + 1) },
+    (_, i) => flight.at(i * step),
+  );
+}
 function Chart({
   flight,
   runs,
-  time,
+  clock,
   seek,
   index,
   remove,
 }: {
   flight: Flight;
   runs: Run[];
-  time: number;
+  clock: RefObject<number>;
   seek: (t: number) => void;
   index: number;
   remove?: () => void;
@@ -42,6 +158,19 @@ function Chart({
     [zoom, setZoom] = useState(1),
     [hover, setHover] = useState<{ value: number; left: number }>();
   const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const wheel = (e: WheelEvent) => {
+      if (!e.altKey) return;
+      e.preventDefault();
+      setZoom((v) =>
+        Math.max(1, Math.min(16, v * Math.exp(-e.deltaY * 0.002))),
+      );
+    };
+    element.addEventListener("wheel", wheel, { passive: false });
+    return () => element.removeEventListener("wheel", wheel);
+  }, []);
   const exportSvg = () => {
     const svg = ref.current?.querySelector("svg.recharts-surface");
     if (svg) {
@@ -51,6 +180,21 @@ function Chart({
         "style",
         "background:#101c2c;color:#9bb1ca;font-family:sans-serif;--grid:#243247;--muted:#9bb1ca;--cyan:#65d4f3",
       );
+      const cursor =
+        ref.current?.querySelector<SVGLineElement>(".chart-time-cursor");
+      if (cursor) {
+        const percent = parseFloat(cursor.getAttribute("x1") || "0") / 100;
+        if (percent >= 0 && percent <= 1) {
+          const exported = cursor.cloneNode(true) as SVGLineElement;
+          const bounds = svg.getBoundingClientRect(),
+            px = 68 + percent * (bounds.width - 88);
+          exported.setAttribute("x1", String(px));
+          exported.setAttribute("x2", String(px));
+          exported.setAttribute("y1", "15");
+          exported.setAttribute("y2", String(bounds.height - 30));
+          clone.appendChild(exported);
+        }
+      }
       downloadFile(
         new XMLSerializer().serializeToString(clone),
         "image/svg+xml",
@@ -62,24 +206,28 @@ function Chart({
     () => [{ name: "Текущий запуск", color: "var(--cyan)", flight }, ...runs],
     [flight, runs],
   );
-  const data = useMemo(
-    () =>
-      series
-        .flatMap((run, ri) =>
-          run.flight.samples.map((s) => ({
-            [x]: s[x],
-            [`series${ri}`]: s[y],
-            time: s.t,
-          })),
-        )
-        .sort((a, b) => Number(a[x]) - Number(b[x])),
-    [series, x, y],
-  );
-  const xValues = data.map((s) => Number(s[x]));
-  const low = Math.min(...xValues),
-    high = Math.max(...xValues),
-    span = Math.max(high - low, 0.01),
-    center = (low + high) / 2;
+  const domains = useMemo(() => {
+    let low = Infinity,
+      high = -Infinity,
+      yMin = Infinity,
+      yMax = -Infinity;
+    for (const run of series)
+      for (const state of run.flight.samples) {
+        low = Math.min(low, state[x]);
+        high = Math.max(high, state[x]);
+        yMin = Math.min(yMin, state[y]);
+        yMax = Math.max(yMax, state[y]);
+      }
+    const domain = axisTicks(low, high),
+      center = (domain.min + domain.max) / 2,
+      span = domain.max - domain.min;
+    return {
+      x: axisTicks(center - span / (2 * zoom), center + span / (2 * zoom)),
+      y: axisTicks(yMin, yMax),
+    };
+  }, [series, x, y, zoom]);
+  const xMin = domains.x.min,
+    xMax = domains.x.max;
   const closest = (f: Flight, value: number) =>
     f.samples.reduce((a, b) =>
       Math.abs(a[x] - value) <= Math.abs(b[x] - value) ? a : b,
@@ -98,7 +246,7 @@ function Chart({
     )
       return undefined;
     const ratio = (event.clientX - plot.left) / plot.width;
-    return center - span / (2 * zoom) + (ratio * span) / zoom;
+    return xMin + ratio * (xMax - xMin);
   };
   return (
     <div className={`chart-panel ${large ? "chart-expanded" : ""}`} ref={ref}>
@@ -187,60 +335,26 @@ function Chart({
           if (value !== undefined)
             seek(x === "t" ? value : closest(flight, value).t);
         }}
-        onWheel={(e) =>
-          setZoom((v) =>
-            Math.max(1, Math.min(16, v * (e.deltaY > 0 ? 0.9 : 1.1))),
-          )
-        }
       >
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart
-            data={data}
-            margin={{ top: 15, right: 20, left: 0, bottom: 0 }}
+        <StaticPlot {...{ series, x, y, domains }} />
+        <ChartCursor {...{ flight, clock, x, xMin, xMax }} />
+        {hover && (
+          <svg
+            className="chart-overlay"
+            width="100%"
+            height="100%"
+            aria-hidden="true"
           >
-            <CartesianGrid stroke="var(--grid)" vertical={false} />
-            <XAxis
-              dataKey={x}
-              type="number"
-              domain={[center - span / (2 * zoom), center + span / (2 * zoom)]}
-              allowDataOverflow
-              tickFormatter={(v) => fmt(v, 1)}
+            <line
+              x1={`${((hover.value - xMin) / (xMax - xMin)) * 100}%`}
+              x2={`${((hover.value - xMin) / (xMax - xMin)) * 100}%`}
+              y1="0"
+              y2="100%"
               stroke="var(--muted)"
-              fontSize={11}
+              strokeDasharray="2 3"
             />
-            <YAxis
-              tickFormatter={(v) => fmt(v, 1)}
-              width={58}
-              stroke="var(--muted)"
-              fontSize={11}
-            />
-            {series.map((run, i) => (
-              <Line
-                key={i}
-                name={run.name}
-                data={run.flight.samples}
-                dataKey={y}
-                stroke={run.color}
-                strokeWidth={i ? 1.7 : 2.5}
-                dot={false}
-                isAnimationActive={false}
-                connectNulls
-              />
-            ))}
-            {hover && (
-              <ReferenceLine
-                x={hover.value}
-                stroke="var(--muted)"
-                strokeDasharray="2 3"
-              />
-            )}
-            <ReferenceLine
-              x={flight.at(time)[x]}
-              stroke="#b39aff"
-              strokeDasharray="4 4"
-            />
-          </LineChart>
-        </ResponsiveContainer>
+          </svg>
+        )}
         {hover && (
           <div
             className="plot-tooltip"
@@ -271,18 +385,19 @@ function Chart({
         )}
       </div>
       <div className="chart-hint">
-        Нажмите на кривую, чтобы выбрать момент · колесо и кнопки ± меняют
-        масштаб
+        Нажмите на кривую, чтобы выбрать момент · Alt + колесо или ±: масштаб
+        {x !== "t" &&
+          " · При повторяющемся X выбирается ближайший отсчёт текущего запуска"}
       </div>
     </div>
   );
 }
-export default function Analysis({
+function Analysis({
   flight,
   params,
   runs,
   setRuns,
-  time,
+  clock,
   seek,
   addRun,
 }: {
@@ -290,16 +405,16 @@ export default function Analysis({
   params: Parameters;
   runs: Run[];
   setRuns: (r: Run[]) => void;
-  time: number;
+  clock: RefObject<number>;
   seek: (t: number) => void;
   addRun: () => void;
 }) {
   const [tab, setTab] = useState("charts"),
     [count, setCount] = useState(2),
     [step, setStep] = useState(0.2);
-  const table = Array.from(
-    { length: Math.min(5001, Math.floor(flight.duration / step) + 1) },
-    (_, i) => flight.at(i * step),
+  const table = useMemo(
+    () => (tab === "table" ? makeTable(flight, step) : []),
+    [flight, step, tab],
   );
   const exportCsv = () => {
     const keys = Object.keys(LABELS) as (keyof State)[];
@@ -307,7 +422,7 @@ export default function Analysis({
       "\uFEFF" +
         keys.map((k) => LABELS[k]).join(";") +
         "\n" +
-        table
+        (tab === "table" ? table : makeTable(flight, step))
           .map((s) =>
             keys.map((k) => s[k].toFixed(6).replace(".", ",")).join(";"),
           )
@@ -379,7 +494,7 @@ export default function Analysis({
               <Chart
                 key={i}
                 index={i}
-                {...{ flight, runs, time, seek }}
+                {...{ flight, runs, clock, seek }}
                 remove={count > 1 ? () => setCount((c) => c - 1) : undefined}
               />
             ))}
@@ -489,3 +604,5 @@ export default function Analysis({
     </section>
   );
 }
+
+export default memo(Analysis);
