@@ -1772,8 +1772,8 @@ tbody tr:hover {
 }
 .formulas {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 50px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px 40px;
   padding: 30px 15px;
   color: var(--muted);
   font-size: 12px;
@@ -1788,6 +1788,25 @@ tbody tr:hover {
     serif;
   color: var(--cyan);
   margin: 20px 0;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.formula-scope,
+.formula-method {
+  grid-column: 1 / -1;
+}
+.formula-active-note {
+  border-left: 2px solid var(--cyan);
+  padding-left: 12px;
+}
+.formulas article {
+  min-width: 0;
+}
+.formulas .trajectory-formula {
+  font-size: 18px;
+}
+.formulas .model-expression {
+  font-size: 17px;
 }
 .formulas h3 {
   font-size: 15px;

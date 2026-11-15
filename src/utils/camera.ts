@@ -32,6 +32,33 @@ export function zoomAt(
     y: point.y + (y - size.h / 2) / scale,
   };
 }
+export interface Point {
+  x: number;
+  y: number;
+}
+/** Move the world point at the old pinch midpoint to the new midpoint while zooming. */
+export function pinchCamera(
+  camera: Camera,
+  size: Size,
+  start: readonly [Point, Point],
+  end: readonly [Point, Point],
+): Camera {
+  const distance = (points: readonly [Point, Point]) =>
+    Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
+  // Keep coincident fingers finite without resetting the gesture's camera.
+  const before = Math.max(1, distance(start)),
+    after = Math.max(1, distance(end));
+  const oldX = (start[0].x + start[1].x) / 2,
+    oldY = (start[0].y + start[1].y) / 2,
+    newX = (end[0].x + end[1].x) / 2,
+    newY = (end[0].y + end[1].y) / 2;
+  const next = zoomAt(camera, size, after / before, oldX, oldY);
+  return {
+    scale: next.scale,
+    x: next.x - (newX - oldX) / next.scale,
+    y: next.y + (newY - oldY) / next.scale,
+  };
+}
 export function fitCamera(
   size: Size,
   minX: number,
