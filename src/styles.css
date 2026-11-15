@@ -1744,6 +1744,15 @@ small {
   overflow: auto;
   max-height: 400px;
 }
+.table-scroll table {
+  table-layout: fixed;
+  min-width: 1000px;
+}
+.table-scroll th,
+.table-scroll td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 table {
   width: 100%;
   border-collapse: collapse;
