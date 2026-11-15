@@ -3,8 +3,14 @@ import { Crosshair, Minus, Plus, Move, RotateCcw } from "lucide-react";
 import type { Flight, Parameters, State } from "../physics/types";
 import { fmt } from "../physics/types";
 import { clampParameter } from "../physics/limits";
-import { fitCamera, screen, world as toWorld, zoomAt } from "../utils/camera";
-import type { Camera } from "../utils/camera";
+import {
+  fitCamera,
+  pinchCamera,
+  screen,
+  world as toWorld,
+  zoomAt,
+} from "../utils/camera";
+import type { Camera, Point } from "../utils/camera";
 import { formatTick, niceStep, ticks } from "../utils/ticks";
 import { projectedLine, trajectory } from "../utils/trajectory";
 export interface Layers {
@@ -56,6 +62,12 @@ export default function Scene({
     y: number;
     multiplier: number;
   } | null>(null);
+  const pointers = useRef(new Map<number, Point>());
+  const pinch = useRef<{
+    camera: Camera;
+    points: [Point, Point];
+  } | null>(null);
+  const suppressClick = useRef(false);
   useEffect(() => {
     const observer = new ResizeObserver(([e]) =>
       setSize({ w: e.contentRect.width, h: e.contentRect.height }),
@@ -77,6 +89,38 @@ export default function Scene({
     [camera, size, bounds, flight],
   );
   const scale = view.scale;
+  const liveCamera = useRef(view);
+  liveCamera.current = view;
+  const moveCamera = (next: Camera) => {
+    liveCamera.current = next;
+    setCamera(next);
+  };
+  const pointerPoint = (e: React.PointerEvent<SVGSVGElement>): Point => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return {
+      x: ((e.clientX - rect.left) * w) / rect.width,
+      y: ((e.clientY - rect.top) * h) / rect.height,
+    };
+  };
+  const startPinch = () => {
+    const [a, b] = pointers.current.values();
+    pinch.current =
+      a && b ? { camera: liveCamera.current, points: [a, b] } : null;
+  };
+  const endPointer = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!pointers.current.delete(e.pointerId)) return;
+    if (e.currentTarget.hasPointerCapture(e.pointerId))
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    if (pointers.current.size >= 2) startPinch();
+    else {
+      pinch.current = null;
+      const [remaining] = pointers.current.values();
+      // Continue with camera panning, never resume an interrupted body/vector drag.
+      drag.current = remaining
+        ? { mode: "pan", ...remaining, multiplier: vectorSeconds }
+        : null;
+    }
+  };
   const sx = (x: number) => screen(view, size, x, 0).x,
     sy = (y: number) => screen(view, size, 0, y).y;
   const world = (x: number, y: number) => toWorld(view, size, x, y);
@@ -171,7 +215,7 @@ export default function Scene({
             <stop offset=".45" stopColor="#adf3ff" />
             <stop offset="1" stopColor="#4cc9ed" />
           </radialGradient>
-          <filter id="glow">
+          <filter id="glow" x="-75%" y="-75%" width="250%" height="250%">
             <feGaussianBlur stdDeviation="5" />
           </filter>
           {["#5bd8f5", "#b39aff", "#ffbe7c", "#e98caf"].map((c) => (
@@ -304,23 +348,46 @@ export default function Scene({
         role="img"
         aria-label="Интерактивная траектория броска тела"
         onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          const point = pointerPoint(e);
+          pointers.current.set(e.pointerId, point);
+          e.currentTarget.setPointerCapture(e.pointerId);
+          if (pointers.current.size >= 2) {
+            suppressClick.current = true;
+            drag.current = null;
+            startPinch();
+            return;
+          }
+          suppressClick.current = false;
           const target = e.target as Element;
-          setCamera(view);
+          moveCamera(liveCamera.current);
           drag.current = {
             mode: target.getAttribute("data-drag") || "pan",
-            x: e.clientX,
-            y: e.clientY,
+            ...point,
             multiplier: vectorSeconds,
           };
-          e.currentTarget.setPointerCapture(e.pointerId);
         }}
         onPointerMove={(e) => {
-          if (!drag.current) return;
-          const rect = e.currentTarget.getBoundingClientRect(),
-            p = world(
-              ((e.clientX - rect.left) * w) / rect.width,
-              ((e.clientY - rect.top) * h) / rect.height,
+          if (!pointers.current.has(e.pointerId)) return;
+          const point = pointerPoint(e);
+          pointers.current.set(e.pointerId, point);
+          if (pinch.current) {
+            const [a, b] = pointers.current.values();
+            moveCamera(
+              pinchCamera(pinch.current.camera, size, pinch.current.points, [
+                a,
+                b,
+              ]),
             );
+            return;
+          }
+          if (!drag.current) return;
+          const p = toWorld(liveCamera.current, size, point.x, point.y);
+          if (
+            Math.hypot(point.x - drag.current.x, point.y - drag.current.y) > 2
+          )
+            suppressClick.current = true;
           if (drag.current.mode === "launch")
             onParams?.({
               x0: clampParameter("x0", p.x),
@@ -340,23 +407,21 @@ export default function Scene({
               ),
             });
           } else {
-            const dx = e.clientX - drag.current.x,
-              dy = e.clientY - drag.current.y;
-            setCamera((c) => ({
-              ...view,
+            const c = liveCamera.current;
+            moveCamera({
               ...c,
-              x: (c ?? view).x - dx / scale,
-              y: (c ?? view).y + dy / scale,
-            }));
+              x: c.x - (point.x - drag.current.x) / c.scale,
+              y: c.y + (point.y - drag.current.y) / c.scale,
+            });
           }
-          drag.current.x = e.clientX;
-          drag.current.y = e.clientY;
+          drag.current.x = point.x;
+          drag.current.y = point.y;
         }}
-        onPointerUp={() => {
-          drag.current = null;
-        }}
-        onPointerCancel={() => {
-          drag.current = null;
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
+        onLostPointerCapture={endPointer}
+        onClickCapture={(e) => {
+          if (suppressClick.current) e.stopPropagation();
         }}
       >
         {staticScene}
@@ -456,7 +521,7 @@ export default function Scene({
         100 px = {formatTick(100 / scale, niceStep(0.1 / scale))} м
       </span>
       <div className="scene-footer">
-        <span>
+        <span title="Масштабирование сцены двумя пальцами">
           <Move size={13} /> Перетаскивание · камера
         </span>
         <span>

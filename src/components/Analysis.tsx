@@ -8,9 +8,11 @@ import {
   YAxis,
 } from "recharts";
 import { Download, Plus, Minus, Maximize2, X, Trash2 } from "lucide-react";
-import type { Flight, Parameters, Run, State } from "../physics/types";
+import type { Flight, Model, Parameters, Run, State } from "../physics/types";
 import type { RefObject } from "react";
 import { axisTicks, formatTick } from "../utils/ticks";
+import { velocityAngles } from "../physics/measurements";
+import FormulaGuide from "./FormulaGuide";
 import { fmt, LABELS } from "../physics/types";
 export function downloadFile(content: BlobPart, type: string, name: string) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -20,7 +22,25 @@ export function downloadFile(content: BlobPart, type: string, name: string) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
-type Series = { name: string; color: string; flight: Flight; id?: number }[];
+const PLOT_LABELS = {
+  ...LABELS,
+  thetaX: "Угол скорости с Ox (θx), °",
+  thetaY: "Угол скорости с Oy (θy), °",
+};
+type PlotQuantity = keyof typeof PLOT_LABELS;
+type PlotState = State & ReturnType<typeof velocityAngles>;
+const isAngle = (key: PlotQuantity) => key === "thetaX" || key === "thetaY";
+const plotState = (state: State): PlotState => ({
+  ...state,
+  ...velocityAngles(state.vx, state.vy),
+});
+type Series = {
+  name: string;
+  color: string;
+  flight: Flight;
+  samples: PlotState[];
+  id?: number;
+}[];
 type Domains = {
   x: ReturnType<typeof axisTicks>;
   y: ReturnType<typeof axisTicks>;
@@ -33,7 +53,7 @@ const StaticPlot = memo(function StaticPlot({
 }: {
   series: Series;
   x: keyof State;
-  y: keyof State;
+  y: PlotQuantity;
   domains: Domains;
 }) {
   return (
@@ -69,9 +89,10 @@ const StaticPlot = memo(function StaticPlot({
           <Line
             key={run.id ?? "current"}
             name={run.name}
-            data={run.flight.samples}
+            data={run.samples}
             dataKey={y}
             type="linear"
+            connectNulls={false}
             stroke={run.color}
             strokeWidth={i ? 1.7 : 2.5}
             dot={false}
@@ -151,7 +172,7 @@ function Chart({
   remove?: () => void;
 }) {
   const [x, setX] = useState<keyof State>("t"),
-    [y, setY] = useState<keyof State>(
+    [y, setY] = useState<PlotQuantity>(
       ["y", "speed", "energy", "vy"][index] as keyof State,
     ),
     [large, setLarge] = useState(false),
@@ -203,7 +224,10 @@ function Chart({
     }
   };
   const series = useMemo(
-    () => [{ name: "Текущий запуск", color: "var(--cyan)", flight }, ...runs],
+    () =>
+      [{ name: "Текущий запуск", color: "var(--cyan)", flight }, ...runs].map(
+        (run) => ({ ...run, samples: run.flight.samples.map(plotState) }),
+      ),
     [flight, runs],
   );
   const domains = useMemo(() => {
@@ -212,18 +236,21 @@ function Chart({
       yMin = Infinity,
       yMax = -Infinity;
     for (const run of series)
-      for (const state of run.flight.samples) {
+      for (const state of run.samples) {
         low = Math.min(low, state[x]);
         high = Math.max(high, state[x]);
-        yMin = Math.min(yMin, state[y]);
-        yMax = Math.max(yMax, state[y]);
+        const value = state[y];
+        if (value !== null) {
+          yMin = Math.min(yMin, value);
+          yMax = Math.max(yMax, value);
+        }
       }
     const domain = axisTicks(low, high),
       center = (domain.min + domain.max) / 2,
       span = domain.max - domain.min;
     return {
       x: axisTicks(center - span / (2 * zoom), center + span / (2 * zoom)),
-      y: axisTicks(yMin, yMax),
+      y: isAngle(y) ? axisTicks(0, 180) : axisTicks(yMin, yMax),
     };
   }, [series, x, y, zoom]);
   const xMin = domains.x.min,
@@ -255,9 +282,17 @@ function Chart({
           <select
             aria-label={`График ${index + 1}: ось Y`}
             value={y}
-            onChange={(e) => setY(e.target.value as keyof State)}
+            onChange={(e) => {
+              const value = e.target.value as PlotQuantity;
+              setY(value);
+              if (isAngle(value)) {
+                setX("t");
+                setZoom(1);
+              }
+              setHover(undefined);
+            }}
           >
-            {Object.entries(LABELS).map(([k, v]) => (
+            {Object.entries(PLOT_LABELS).map(([k, v]) => (
               <option key={k} value={k}>
                 {v}
               </option>
@@ -267,6 +302,12 @@ function Chart({
           <select
             aria-label={`График ${index + 1}: ось X`}
             value={x}
+            disabled={isAngle(y)}
+            title={
+              isAngle(y)
+                ? "Для углов доступна зависимость от времени"
+                : undefined
+            }
             onChange={(e) => {
               setX(e.target.value as keyof State);
               setZoom(1);
@@ -369,16 +410,22 @@ function Chart({
             <strong>
               {LABELS[x]}: {fmt(hover.value, 3)}
             </strong>
-            <p className="muted">{LABELS[y]}</p>
+            <p className="muted">{PLOT_LABELS[y]}</p>
             {series.map((run, i) => (
               <p key={i} style={{ color: run.color }}>
                 {run.name}:{" "}
-                {fmt(
-                  (x === "t"
-                    ? run.flight.at(hover.value)
-                    : closest(run.flight, hover.value))[y],
-                  3,
-                )}
+                {(() => {
+                  const state =
+                    x === "t"
+                      ? run.flight.at(hover.value)
+                      : closest(run.flight, hover.value);
+                  const value =
+                    isAngle(y) &&
+                    (hover.value < 0 || hover.value > run.flight.duration)
+                      ? null
+                      : plotState(state)[y];
+                  return value === null ? "—" : fmt(value, 3);
+                })()}
               </p>
             ))}
           </div>
@@ -386,6 +433,7 @@ function Chart({
       </div>
       <div className="chart-hint">
         Нажмите на кривую, чтобы выбрать момент · Alt + колесо или ±: масштаб
+        {isAngle(y) && " · Только θ(t); при нулевой скорости — разрыв"}
         {x !== "t" &&
           " · При повторяющемся X выбирается ближайший отсчёт текущего запуска"}
       </div>
@@ -395,6 +443,7 @@ function Chart({
 function Analysis({
   flight,
   params,
+  model,
   runs,
   setRuns,
   clock,
@@ -403,6 +452,7 @@ function Analysis({
 }: {
   flight: Flight;
   params: Parameters;
+  model?: Model;
   runs: Run[];
   setRuns: (r: Run[]) => void;
   clock: RefObject<number>;
@@ -568,39 +618,7 @@ function Analysis({
           </div>
         </>
       )}
-      {tab === "formulas" && (
-        <div className="formulas">
-          <article>
-            <div className="eyebrow">УРАВНЕНИЯ ДВИЖЕНИЯ</div>
-            <p className="formula">x(t) = x₀ + v₀ cos α · t</p>
-            <p className="formula">y(t) = h₀ + v₀ sin α · t − gt²/2</p>
-            <p>
-              Без сопротивления используется аналитическое решение. Для F = −k(v
-              − u) используется точное решение линейного уравнения с устойчивым
-              вычислением экспоненты.
-            </p>
-            <p className="formula">Eк = mv²/2 · Eп = mgy</p>
-          </article>
-          <article>
-            <div className="eyebrow">РАСЧЁТНЫЙ МЕТОД</div>
-            <h3>{flight.method}</h3>
-            <p>
-              Земля: y = 0. Время столкновения уточняется бисекцией. В
-              пользовательской модели работает RK4 с ограничением в 20 000
-              шагов. Высота пользовательской модели оценивается по выборке.
-            </p>
-            <p>
-              Начальные условия: v₀ = {fmt(params.speed)} м/с, α ={" "}
-              {fmt(params.angle)}°, h₀ = {fmt(params.height)} м; m ={" "}
-              {fmt(params.mass)} кг, g = {fmt(params.g)} м/с².
-            </p>
-            <p>
-              Все расчёты в СИ. При сопротивлении энергия рассеивается, ветер
-              может передавать энергию телу.
-            </p>
-          </article>
-        </div>
-      )}
+      {tab === "formulas" && <FormulaGuide {...{ flight, params, model }} />}
     </section>
   );
 }

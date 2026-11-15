@@ -40,6 +40,7 @@ import ParametersPanel from "../components/Parameters";
 const Analysis = lazy(() => import("../components/Analysis"));
 import ModelEditor from "../components/ModelEditor";
 import { calculate } from "../physics/engine";
+import { velocityAngles } from "../physics/measurements";
 import { DEFAULTS, fmt } from "../physics/types";
 import type { Model, Parameters, Run } from "../physics/types";
 import { usePlayback } from "../hooks/usePlayback";
@@ -100,6 +101,7 @@ export default function Laboratory() {
   const { flight } = result,
     playback = usePlayback(flight.duration),
     current = flight.at(playback.time);
+  const angles = velocityAngles(current.vx, current.vy);
   const clock = useRef(0);
   useLayoutEffect(() => {
     clock.current = playback.time;
@@ -435,6 +437,27 @@ export default function Laboratory() {
                   <strong>{fmt(current.vy)}</strong>
                 </div>
               </div>
+              <div className="measurement-pair compact">
+                {(
+                  [
+                    ["Ox", angles.thetaX],
+                    ["Oy", angles.thetaY],
+                  ] as const
+                ).map(([axis, angle]) => (
+                  <div key={axis}>
+                    <label>Угол скорости с {axis}</label>
+                    <strong data-testid={`hud-angle-${axis}`}>
+                      {angle === null ? (
+                        "—"
+                      ) : (
+                        <>
+                          {fmt(angle)} <small>°</small>
+                        </>
+                      )}
+                    </strong>
+                  </div>
+                ))}
+              </div>
               <div className="metric-line">
                 <span>Ускорение</span>
                 <strong>
@@ -611,7 +634,7 @@ export default function Laboratory() {
           fallback={<div className="loading-state">Подготовка графиков…</div>}
         >
           <Analysis
-            {...{ flight, params, runs, setRuns, addRun }}
+            {...{ flight, params, model, runs, setRuns, addRun }}
             clock={clock}
             seek={playback.seek}
           />

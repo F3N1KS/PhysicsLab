@@ -4,6 +4,7 @@ import {
   world,
   screen,
   zoomAt,
+  pinchCamera,
   MIN_SCALE,
   MAX_SCALE,
   clipSegment,
@@ -13,6 +14,42 @@ import { calculate } from "../physics/engine";
 import { DEFAULTS } from "../physics/types";
 const size = { w: 1000, h: 600 };
 describe("Камера в мировых координатах", () => {
+  it("удерживает точку под движущимся центром pinch и обратимо меняет масштаб", () => {
+    const camera = { x: 120, y: -7, scale: 4 };
+    const start = [
+      { x: 100, y: 180 },
+      { x: 200, y: 220 },
+    ] as const;
+    const end = [
+      { x: 80, y: 210 },
+      { x: 280, y: 290 },
+    ] as const;
+    const point = world(camera, size, 150, 200);
+    const zoomed = pinchCamera(camera, size, start, end);
+    expect(zoomed.scale).toBe(8);
+    expect(screen(zoomed, size, point.x, point.y)).toEqual({ x: 180, y: 250 });
+    expect(pinchCamera(zoomed, size, end, start)).toEqual(camera);
+  });
+  it("сохраняет привязку pinch на пределах масштаба и при совпавших пальцах", () => {
+    const start = [
+      { x: 200, y: 100 },
+      { x: 300, y: 100 },
+    ] as const;
+    const end = [
+      { x: 100, y: 200 },
+      { x: 500, y: 200 },
+    ] as const;
+    const camera = { x: 0, y: 0, scale: MAX_SCALE };
+    const point = world(camera, size, 250, 100);
+    const next = pinchCamera(camera, size, start, end);
+    expect(next.scale).toBe(MAX_SCALE);
+    const pixel = screen(next, size, point.x, point.y);
+    expect(pixel.x).toBeCloseTo(300, 8);
+    expect(pixel.y).toBeCloseTo(200, 8);
+    const coincident = pinchCamera(camera, size, start, [end[0], end[0]]);
+    expect(coincident.scale).toBe(camera.scale / 100);
+    expect(Object.values(coincident).every(Number.isFinite)).toBe(true);
+  });
   it("точно обращает экранное преобразование во всём диапазоне", () => {
     for (const scale of [MIN_SCALE, 0.001, 1, 1000, MAX_SCALE]) {
       const camera = { x: 1e6, y: -1e6, scale };
