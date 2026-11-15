@@ -463,7 +463,7 @@ function Analysis({
     [count, setCount] = useState(2),
     [step, setStep] = useState(0.2);
   const table = useMemo(
-    () => (tab === "table" ? makeTable(flight, step) : []),
+    () => (tab === "table" ? makeTable(flight, step).map(plotState) : []),
     [flight, step, tab],
   );
   const exportCsv = () => {
@@ -589,6 +589,8 @@ function Analysis({
                     "vₓ, м/с",
                     "vᵧ, м/с",
                     "|v|, м/с",
+                    "Угол скорости с Ox, °",
+                    "Угол скорости с Oy, °",
                     "Eк, Дж",
                     "Eп, Дж",
                   ].map((v) => (
@@ -606,11 +608,20 @@ function Analysis({
                       if (e.key === "Enter") seek(s.t);
                     }}
                   >
-                    {[s.t, s.x, s.y, s.vx, s.vy, s.speed, s.ek, s.ep].map(
-                      (v, j) => (
-                        <td key={j}>{fmt(v)}</td>
-                      ),
-                    )}
+                    {[
+                      s.t,
+                      s.x,
+                      s.y,
+                      s.vx,
+                      s.vy,
+                      s.speed,
+                      s.thetaX,
+                      s.thetaY,
+                      s.ek,
+                      s.ep,
+                    ].map((v, j) => (
+                      <td key={j}>{v === null ? "—" : fmt(v)}</td>
+                    ))}
                   </tr>
                 ))}
               </tbody>
