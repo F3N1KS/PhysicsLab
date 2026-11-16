@@ -83,10 +83,17 @@ function Shell() {
     </div>
   );
 }
+
 export default function App() {
+  const Router =
+    window.location.hostname === "f3n1ks.github.io"
+      ? HashRouter
+      : BrowserRouter;
+
   return (
-    <BrowserRouter>
+    <Router>
       <Shell />
-    </BrowserRouter>
+    </Router>
   );
 }
+
