@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState } from "react";
 import {
   BrowserRouter,
+  HashRouter,
   NavLink,
   Route,
   Routes,
