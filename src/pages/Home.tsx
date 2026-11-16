@@ -358,7 +358,12 @@ export function Mechanics() {
   );
 }
 export function ComingSoon() {
-  const section = SECTIONS.find((s) => location.pathname.includes(s.id));
+  const { pathname } = useLocation();
+
+  const section = SECTIONS.find(
+    (s) => pathname === `/${s.id}`
+  );
+
   return (
     <div className="coming-page page">
       <div className="icon-tile">
