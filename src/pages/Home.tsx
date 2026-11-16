@@ -157,7 +157,17 @@ export function Home() {
             <Link className="primary" to="/mechanics/projectile">
               Начать эксперимент <ArrowRight size={18} />
             </Link>
-            <a href="#sections" className="text-button">
+            <a
+              href="#sections"
+              className="text-button"
+              onClick={(event) => {
+                event.preventDefault();
+                document.getElementById("sections")?.scrollIntoView({
+                  behavior: "smooth",
+                  block: "start",
+                });
+              }}
+            >
               Все разделы <ArrowUpRight size={16} />
             </a>
           </div>
